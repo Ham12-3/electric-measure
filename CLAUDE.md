@@ -44,10 +44,32 @@ briefly, in plain English, in comments and the README.
   to start-of-hour labels to match demand.
 - Free tier: 600 calls/min, 5k/hour, 10k/day; weight = max(1, vars/10) * max(1, days/14).
 
+## Forecasting conventions (Phase 2)
+- Hours are labelled by their START (UTC). Origin `t`, horizon `h` -> target `T = t + h - 1`;
+  newest known demand is hour `T - h`. So demand lag `k` is legal iff `k >= h`.
+- Weather lead day `N(h) = ceil((h + 8) / 24)`, capped at 7 (h=1->1, 24->2, 168->7).
+  Fallback for missing values: older leads only. 168h is mildly optimistic (documented).
+- Weather features in test mode are built ONLY from the horizon's forecast series
+  (including the 24h rolling temp). Training uses actual weather.
+- Folds: quarterly, split by ORIGIN, expanding window from 2021-01-01, first origin
+  2024-04-01. One fresh model per (fold, horizon); seeds reset per fit.
+- Model interface: `fit(train_df, h)` / `predict(test_df, h) -> DataFrame[y_pred, (q10, q90)]`
+  (see `models/base.py`). Register new models in `evaluation/backtest.py:model_registry`.
+- Baseline uses `lag_168` (UTC), so it's misaligned by 1h in the week after a clock change.
+
+## Open issues for later phases
+- Serving (Phase 5): NESO historic demand lags ~3 weeks, so it can't drive live 1h/24h
+  forecasts. Need a near-real-time source (e.g. Elexon BMRS demand outturn); verify then.
+
 ## Layout
 - `configs/config.yaml` - all tunables (cities + weights, dates, horizons, seed).
-- `src/demand_forecast/data/` - `download_demand.py`, `download_weather.py`, `clean.py`.
-- `data/raw/` cached downloads, `data/processed/` parquet outputs (both gitignored).
+- `src/demand_forecast/data/` - `download_demand.py`, `download_weather.py`, `clean.py`,
+  `dataset.py` (loads processed files).
+- `src/demand_forecast/features/` - `calendar.py`, `lags.py`, `weather.py`, `build.py`.
+- `src/demand_forecast/models/` - `base.py` (interface), `baseline.py`.
+- `src/demand_forecast/evaluation/` - `metrics.py`, `backtest.py` (CLI).
+- `data/raw/` cached downloads, `data/processed/` parquet outputs, `artifacts/` backtest
+  predictions (all gitignored). `reports/metrics/*.csv` and `reports/figures/` are committed.
 - `notebooks/` exploration; built by `notebooks/build_exploration.py`.
 
 ## Commands
@@ -55,6 +77,8 @@ briefly, in plain English, in comments and the README.
 - `uv run python -m demand_forecast.data.download_demand`
 - `uv run python -m demand_forecast.data.download_weather` (~10 min, rate-limit paced)
 - `uv run python -m demand_forecast.data.clean`
+- `uv run python -m demand_forecast.evaluation.backtest --model baseline [--weather actual]`
 - `uv run pytest`
+- Windows: set `PYTHONIOENCODING=utf-8` when printing tables with non-ASCII characters.
 - Windows note: if `import demand_forecast` fails after adding files, run
   `uv sync --reinstall-package demand-forecast`.

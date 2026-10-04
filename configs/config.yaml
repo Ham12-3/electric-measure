@@ -13,7 +13,30 @@ dates:
   # 1-7 day lead-time coverage (checked by hand: 2024-03-13).
   forecast_weather_start: "2024-03-13"
 
+# Horizon h = forecast of the hour that ENDS h hours after the forecast is made.
+# e.g. at 09:00, h=1 is the 09:00-10:00 hour and the latest known demand is 08:00-09:00.
 horizons_hours: [1, 24, 168]
+
+features:
+  # Demand lags (hours). For horizon h only lags >= h are allowed: anything newer
+  # hasn't happened yet when the forecast is made.
+  demand_lags_hours: [1, 2, 3, 24, 48, 168, 336]
+  # Rolling means of demand over windows ending at the latest known hour.
+  rolling_windows_hours: [24, 168]
+  # Weather inputs. Humidity/cloud/precip are left out: they add little over these three
+  # and have gaps in the forecast archive. Wind matters twice: wind chill raises heating
+  # demand, and small wind farms (embedded generation) reduce National Demand.
+  weather_vars: [temperature_2m, wind_speed_10m, shortwave_radiation]
+  hdd_base_c: 15.5   # heating degrees = max(0, base - T); UK standard base
+  cdd_base_c: 20.0   # cooling degrees = max(0, T - base)
+  # A weather model run becomes downloadable a few hours after its start time.
+  # We assume 8h so forecasts are never used before they existed.
+  publication_delay_hours: 8
+
+backtest:
+  train_start: "2021-01-01"   # expanding window: each fold trains on everything before it
+  test_start: "2024-04-01"    # first forecast origin (forecast weather exists from 2024-03-13)
+  fold_months: 3              # refit every quarter, test on the following quarter
 
 demand:
   ckan_package_url: "https://api.neso.energy/api/3/action/package_show?id=historic-demand-data"

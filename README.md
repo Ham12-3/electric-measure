@@ -5,7 +5,7 @@ and compares Prophet, XGBoost and a Temporal Fusion Transformer against a simple
 "same hour last week" baseline, using only information that would have been available
 at forecast time.
 
-> Status: **Phase 1 (data) complete.** Sections marked _TBD_ are filled in later phases.
+> Status: **Phase 2 (features + baseline) complete.** Sections marked _TBD_ are filled in later phases.
 
 ## 1. Problem
 
@@ -72,9 +72,61 @@ What the cleaning actually found is in `data/processed/cleaning_report.json` and
 
 ## 3. Approach
 
-_TBD (Phases 2–3)._ Planned: calendar + UK bank holiday + horizon-aware lag features,
-a "same hour last week" baseline, rolling-origin backtests from April 2024 onward, and
-MAE / RMSE / MAPE per horizon (plus pinball loss for TFT's prediction intervals).
+### What "1h / 24h / 7d ahead" means exactly
+
+A forecast is made at an **origin** time *t*. Horizon *h* is the hour that **ends**
+*h* hours later. At 09:00 the newest demand we know is the 08:00–09:00 hour, so:
+
+| Horizon | Forecasting (from 09:00 Mon) | Newest demand it may use | Weather forecast it may use |
+|---|---|---|---|
+| 1h | 09:00–10:00 Mon | 08:00–09:00 Mon | issued ≥ 1 day before (lead day 1) |
+| 24h | 08:00–09:00 Tue | 08:00–09:00 Mon | issued ≥ 2 days before (lead day 2) |
+| 168h | 08:00–09:00 next Mon | 08:00–09:00 Mon, i.e. a week before the target | issued 7 days before (lead day 7) |
+
+Every hour in the test period is forecast once **per horizon**, so each horizon is
+scored on ~21,000 target hours covering every hour of the day.
+
+### Features
+
+| Group | Features | Leakage rule |
+|---|---|---|
+| Calendar (UK local time) | hour, weekday, month, weekend, England & Wales bank holiday, Scottish bank holiday, Christmas period, smooth day-of-year | Always known in advance |
+| Demand lags | `lag_k` for k ∈ {1, 2, 3, 24, 48, 168, 336} h; 24h and 168h rolling means | Only lags **k ≥ h**; rolling windows end at the newest known hour. The 168h model gets just `lag_168`, `lag_336` and rolling means ending a week back |
+| Weather | temperature, wind speed, solar radiation; 24h mean temperature; heating degrees max(0, 15.5 − T); cooling degrees max(0, T − 20) | **Training:** actual weather. **Testing:** the weather forecast that existed at the origin |
+
+**Which weather forecast is legal?** A weather model run becomes available about 8 hours
+after it starts. The lead day for horizon *h* is ⌈(h + 8) / 24⌉: day 1 for 1h, day 2 for
+24h, and day 8 for 168h. Day 8 doesn't exist, so we cap at day 7. That last case uses a
+forecast published up to ~8h after the origin, which is a small optimism we accept and
+document. Where a forecast value is missing we fall back to *older* forecasts only.
+
+Wind appears twice in its effect on National Demand. It makes buildings lose heat
+faster, and it powers small wind farms that reduce the demand the transmission network
+sees.
+
+### Rolling-origin backtest
+
+```
+train ─────────────────────────────┤ test Q2-2024
+train ──────────────────────────────────┤ test Q3-2024
+train ───────────────────────────────────────┤ test Q4-2024     … 10 folds to Sep 2026
+```
+
+- Folds are calendar quarters from **April 2024** (when forecast weather begins) to the
+  latest data. Each fold retrains on **all data before it** (expanding window, from
+  January 2021).
+- Folds are split by **forecast origin**. A 7-day forecast made on 30 June belongs to the
+  fold that starts in April, even though its target is in July.
+- Data is never shuffled. Tests check that changing "future" demand or observed weather
+  never changes a feature.
+- Metrics per horizon: MAE (MW), RMSE (MW), MAPE (%); plus pinball loss for quantiles.
+
+### Baseline: same hour last week
+
+ŷ(Tue 18:00) = demand at the previous Tue 18:00. It gets the daily and weekly shape right
+for free and is legal at every horizon up to 7 days. Its accuracy is the same at every
+horizon, because it ignores everything newer than a week. So any gain at 1h and 24h has
+to come from the models using fresher information.
 
 ## 4. Architecture
 
@@ -82,7 +134,18 @@ _TBD (Mermaid diagram)._
 
 ## 5. Results
 
-_TBD (Phase 4)._
+Backtest: April 2024 – September 2026, 10 quarterly folds, forecast weather.
+Models are added in Phase 3.
+
+| Model | Horizon | MAE (MW) | RMSE (MW) | MAPE |
+|---|---|---|---|---|
+| Same hour last week | 1h | 2,057 | 2,781 | 8.17% |
+| Same hour last week | 24h | 2,053 | 2,775 | 8.15% |
+| Same hour last week | 168h | 2,053 | 2,777 | 8.15% |
+
+The baseline's worst days are the cases models need to handle: cold snaps
+(7–8 Jan 2025), bank holidays, Easter, clock-change weekends, and the end of the
+June 2026 heatwave, when it copied a 31 °C week into a 19 °C one.
 
 ## 6. Key findings
 
@@ -107,6 +170,7 @@ uv run python -m demand_forecast.data.download_demand   # ~30 s
 uv run python -m demand_forecast.data.download_weather  # ~10 min (free-tier rate limits)
 uv run python -m demand_forecast.data.clean
 uv run python notebooks/build_exploration.py            # builds + runs the notebook
+uv run python -m demand_forecast.evaluation.backtest --model baseline
 uv run pytest
 ```
 
@@ -115,7 +179,7 @@ Downloads are cached in `data/raw/`. Re-running only refreshes the current year.
 ## Roadmap
 
 1. ✅ Setup and data
-2. Features and baseline
+2. ✅ Features and baseline
 3. Models (Prophet, XGBoost, TFT)
 4. Evaluation and write-up
 5. Serving (FastAPI, Streamlit, Docker) and deployment
