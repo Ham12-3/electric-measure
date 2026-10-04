@@ -1,0 +1,12 @@
+# Data is downloaded, never committed (re-create with the download scripts)
+/data/*
+!/data/.gitkeep
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+lightning_logs/
+artifacts/
+.env

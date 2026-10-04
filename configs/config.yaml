@@ -1,0 +1,55 @@
+# Central project configuration. Code reads this via demand_forecast.config.load_config().
+
+seed: 42
+
+paths:
+  raw: data/raw
+  processed: data/processed
+
+dates:
+  # 2021 onwards avoids the worst COVID-2020 distortion while still giving ~5.7 years.
+  start: "2021-01-01"
+  # Honest-evaluation window starts when Open-Meteo's Previous Runs API has full
+  # 1-7 day lead-time coverage (checked by hand: 2024-03-13).
+  forecast_weather_start: "2024-03-13"
+
+horizons_hours: [1, 24, 168]
+
+demand:
+  ckan_package_url: "https://api.neso.energy/api/3/action/package_show?id=historic-demand-data"
+  # Physically plausible range for GB national demand (MW). Anything outside is a data error.
+  plausible_min_mw: 10000
+  plausible_max_mw: 65000
+  # Gaps up to this many half-hours are interpolated; longer gaps stay missing.
+  max_interp_halfhours: 4
+
+weather:
+  archive_url: "https://archive-api.open-meteo.com/v1/archive"
+  previous_runs_url: "https://previous-runs-api.open-meteo.com/v1/forecast"
+  historical_forecast_url: "https://historical-forecast-api.open-meteo.com/v1/forecast"
+  # One fixed weather model for ALL forecast sources (previous_runs and
+  # historical_forecast), so differences reflect lead time, not model choice. "best_match"
+  # picks the Met Office 2 km model for UK cities, which runs ~0.5 degC warmer than the
+  # coarse reanalysis we train on. ECMWF IFS 0.25 matches it (bias ~0), and has full
+  # day1-day7 coverage from 2024-03-13.
+  forecast_model: "ecmwf_ifs025"
+  lead_days: [1, 2, 3, 4, 5, 6, 7]
+  variables:
+    - temperature_2m          # instantaneous, degC
+    - apparent_temperature    # "feels like", degC (wind + humidity)
+    - relative_humidity_2m    # instantaneous, %
+    - wind_speed_10m          # instantaneous, km/h
+    - cloud_cover             # instantaneous, %
+    - precipitation           # sum over the PRECEDING hour, mm
+    - shortwave_radiation     # mean over the PRECEDING hour, W/m2
+  # Open-Meteo labels these at the END of the hour they describe; we shift them to
+  # start-of-hour so they line up with our demand hours (see clean.py).
+  preceding_hour_variables: [precipitation, shortwave_radiation]
+  # Cities stand in for regions. Weights ~ metro/city-region population share, so the
+  # national feature reflects where electricity is actually used.
+  cities:
+    london:     {lat: 51.5072, lon: -0.1276, weight: 0.52}
+    birmingham: {lat: 52.4862, lon: -1.8904, weight: 0.16}
+    manchester: {lat: 53.4808, lon: -2.2426, weight: 0.16}
+    glasgow:    {lat: 55.8642, lon: -4.2518, weight: 0.10}
+    cardiff:    {lat: 51.4816, lon: -3.1791, weight: 0.06}
