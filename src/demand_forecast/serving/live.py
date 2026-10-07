@@ -18,6 +18,7 @@ import requests
 from demand_forecast.config import load_config, processed_dir
 from demand_forecast.data.clean import align_preceding_hour, national_average
 from demand_forecast.data.download_recent import extend_hourly_demand
+from demand_forecast.serving import storage
 from demand_forecast.serving.production import ProductionModel
 
 log = logging.getLogger(__name__)
@@ -55,15 +56,33 @@ def recent_demand(extend: bool = True) -> pd.Series:
 class ForecastService:
     """Computes the live forecast, caching it so repeated API calls are instant."""
 
+    REFRESH_SECONDS = 6 * 3600  # how often to look for a newly retrained model in S3
+
     def __init__(self, ttl_seconds: int = 1800):
         self.cfg = load_config()
+        storage.pull()  # no-op unless ARTIFACT_BUCKET is set
+        self._pulled_at = time.time()
         self.model = ProductionModel()
         self.ttl = ttl_seconds
         self._cache: tuple[float, dict] | None = None
         self._lock = threading.Lock()
 
+    def _maybe_refresh_model(self) -> None:
+        if not storage.enabled() or time.time() - self._pulled_at < self.REFRESH_SECONDS:
+            return
+        self._pulled_at = time.time()
+        try:
+            storage.pull()
+            model = ProductionModel()
+            if model.meta["trained_at"] != self.model.meta["trained_at"]:
+                log.info("loaded retrained model (data until %s)", model.meta["trained_until"])
+                self.model, self._cache = model, None
+        except Exception:  # keep serving the current model if S3 is unavailable
+            log.exception("model refresh failed; keeping current model")
+
     def latest(self) -> dict:
         with self._lock:
+            self._maybe_refresh_model()
             if self._cache and time.time() - self._cache[0] < self.ttl:
                 return self._cache[1]
             demand = recent_demand()

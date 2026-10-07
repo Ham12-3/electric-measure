@@ -337,34 +337,54 @@ docker compose run --rm pipeline   # download, clean, retrain
 docker compose up --build          # API :8000, dashboard :8501
 ```
 
-The image installs only the `serve` extra. Prophet, Darts and PyTorch stay out, which
-keeps it small and the build quick.
+The image installs only the `serve` extra (1.2 GB; Prophet, Darts and PyTorch stay out).
+Tested: `docker compose up` serves a live 168-hour forecast and the dashboard, and the
+`pipeline` container refreshes data and retrains.
 
-### Deploying on AWS (suggested, simple)
+### Deploying on AWS
+
+> **Why not App Runner?** It was the obvious choice, but AWS
+> [closed App Runner to new customers on 30 April 2026](https://docs.aws.amazon.com/apprunner/latest/dg/apprunner-availability-change.html).
+> AWS's recommended replacement is **ECS Express Mode**: one command per service gives an
+> HTTPS URL, a load balancer and autoscaling, without writing load-balancer config.
 
 ```mermaid
 flowchart LR
-    EB[EventBridge Scheduler<br/>daily 06:00] --> ECS[ECS Fargate task<br/>pipeline container]
-    ECS -->|models + processed data| S3[(S3 bucket)]
-    S3 --> AR[App Runner<br/>API container]
-    S3 --> AR2[App Runner<br/>dashboard container]
-    ECR[(ECR image)] --> ECS & AR & AR2
+    EB[EventBridge Scheduler<br/>daily 06:00 UK] --> PT[ECS Fargate task<br/>pipeline container]
+    PT <-->|raw cache, processed data, models| S3[(S3 bucket, private)]
+    S3 -->|pull at start + every 6h| API[ECS Express service<br/>API :8000]
+    API --> DASH[ECS Express service<br/>dashboard :8501]
+    ECR[(ECR image)] --> PT & API & DASH
+    ELX[Elexon + Open-Meteo] --> API
 ```
 
-1. **Image:** build once, push to **ECR**. The same image runs all three roles.
-2. **Daily retraining:** an **EventBridge Scheduler** rule starts the `pipeline` command
-   as an **ECS Fargate** task (1 vCPU / 4 GB is plenty; ~5–10 min). It writes
-   `artifacts/models/` and `data/processed/` to **S3**. A small change is needed:
-   sync those folders from/to S3 at start and end, e.g. `aws s3 sync`.
-3. **API and dashboard:** two **App Runner** services from the same image. App Runner gives
-   HTTPS, autoscaling and scale-to-low with no load balancer to manage. On start (and
-   daily), the API pulls the latest models from S3.
-4. **Ops:** CloudWatch logs and an alarm on pipeline task failure. Secrets aren't needed:
-   all data sources are free and keyless (Open-Meteo is free for non-commercial use;
-   commercial use needs their paid plan).
+- **One image, three roles:** API, dashboard and the daily `pipeline` job all run the same
+  ECR image with different commands.
+- **State lives in S3:** containers are disposable. Set `ARTIFACT_BUCKET` and
+  [`storage.py`](src/demand_forecast/serving/storage.py) syncs models and data. The pipeline
+  pulls the raw-data cache (so downloads stay incremental), retrains and pushes. The API
+  pulls at start-up and every 6 hours, and hot-swaps the model when a new one appears.
+- **Least privilege:** the containers' role can only read and write this one bucket.
 
-Rough cost: App Runner ~$5–15/month per service at low traffic, plus cents for the daily
-Fargate run and S3.
+**Deploy** (from Git Bash, with Docker running):
+
+```bash
+aws configure                      # your credentials; needs AWS CLI v2 recent enough for Express Mode
+REGION=eu-west-2 ./deploy/aws/deploy.sh
+```
+
+[`deploy/aws/deploy.sh`](deploy/aws/deploy.sh) creates or reuses the S3 bucket, ECR repo,
+IAM roles, both Express services and the daily schedule, then prints the URLs. Re-running
+it redeploys. [`deploy/aws/teardown.sh`](deploy/aws/teardown.sh) removes everything, after
+asking you to confirm.
+
+**Cost:** two always-on Fargate services (1 vCPU / 2 GB) plus a load balancer come to
+roughly **$90–110/month**; the daily retrain and S3 cost cents. For a portfolio demo,
+deploy, take screenshots, and tear down, or shrink the dashboard task.
+
+> The deploy scripts are syntax-checked but **haven't been run against a real AWS account**
+> (no credentials were available while building this). Expect to fix small issues on the
+> first run.
 
 ## Roadmap
 
@@ -372,7 +392,7 @@ Fargate run and S3.
 2. ✅ Features and baseline
 3. ✅ Models (Prophet, XGBoost, TFT)
 4. ✅ Evaluation and write-up
-5. ✅ Serving (FastAPI, Streamlit, Docker); AWS deployment documented, not deployed
+5. ✅ Serving (FastAPI, Streamlit, Docker; image tested); AWS deploy script ready, not yet run
 
 ## Data licences
 

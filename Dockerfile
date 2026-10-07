@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Serving image: API + dashboard + daily pipeline. Research-only libraries
 # (Prophet, Darts/PyTorch) are an optional extra and are NOT installed here.
 FROM python:3.12-slim
@@ -11,12 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm 
 WORKDIR /app
 # Install dependencies first (cached layer), then the project itself.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --extra serve --no-install-project
+# The cache mount keeps uv's download cache OUT of the image (saves ~0.9 GB).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra serve --no-install-project
 COPY configs ./configs
 COPY src ./src
 COPY dashboard ./dashboard
 COPY reports ./reports
-RUN uv sync --frozen --no-dev --extra serve
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra serve
 
 # data/ and artifacts/ are mounted as volumes (see docker-compose.yml)
 EXPOSE 8000 8501

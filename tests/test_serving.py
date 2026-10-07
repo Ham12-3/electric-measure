@@ -34,6 +34,16 @@ def test_production_forecast_covers_168_hours_and_ignores_future(synthetic_ds, c
     pd.testing.assert_frame_equal(fc, model.forecast(longer, weather, cfg))
 
 
+@pytest.mark.parametrize("value,expected", [("", None), ("my-bucket", ("my-bucket", "")),
+                                            ("s3://my-bucket/prod/", ("my-bucket", "prod"))])
+def test_storage_bucket_parsing(monkeypatch, value, expected):
+    from demand_forecast.serving import storage
+    monkeypatch.setenv("ARTIFACT_BUCKET", value)
+    assert storage._bucket() == expected
+    if expected is None:  # disabled -> sync is a no-op (no AWS calls)
+        assert storage.pull() == 0 and storage.push() == 0
+
+
 class FakeService:
     model = type("M", (), {"meta": {"model": "xgboost", "trained_until": "2026-09-13T22:00:00+00:00",
                                     "trained_at": "2026-10-07T00:00:00+00:00",

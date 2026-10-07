@@ -16,18 +16,22 @@ from demand_forecast.data import clean
 from demand_forecast.data.dataset import load_dataset
 from demand_forecast.data.download_demand import download_demand
 from demand_forecast.data.download_weather import download_source
+from demand_forecast.serving import storage
 from demand_forecast.serving.production import train_production
 
 log = logging.getLogger(__name__)
 
 
 def run() -> dict:
+    storage.pull(storage.PIPELINE_DIRS)  # no-op unless ARTIFACT_BUCKET is set
     download_demand()
     for source in ("archive", "previous_runs", "historical_forecast"):
         download_source(source)
     clean.main()
     ds = load_dataset()
-    return train_production(ds.demand, ds.weather_actual, load_config())
+    meta = train_production(ds.demand, ds.weather_actual, load_config())
+    storage.push(storage.PIPELINE_DIRS)
+    return meta
 
 
 def main() -> None:
