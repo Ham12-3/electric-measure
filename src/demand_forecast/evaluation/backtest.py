@@ -100,27 +100,48 @@ def run_backtest(model_factory: Callable[[], Forecaster], ds: Dataset, cfg: dict
     folds = make_folds(bt["test_start"], ds.demand.dropna().index[-1], bt["fold_months"])
     train_start = pd.Timestamp(bt["train_start"], tz="UTC")
     cache = FeatureCache(ds, cfg)
-    results = []
-    for h in horizons:
-        for fold in folds:
-            set_seeds(cfg["seed"])
+    shared = getattr(model_factory, "horizon_independent", False)
+    refit_every = getattr(model_factory, "refit_every_folds", 1)
+    results, importances = [], []
+    previous_fold_models: dict[int | None, Forecaster] = {}
+    for fold in folds:
+        fold_models: dict[int | None, Forecaster] = {}
+        for h in horizons:
             train, test = split_fold(cache, fold, h, weather_mode, train_start)
-            model = model_factory()
+            key = None if shared else h
             t0 = time.perf_counter()
-            model.fit(train, h)
-            pred = model.predict(test, h)
-            log.info("%-10s h=%-3d fold %d %s..%s train=%d test=%d %.1fs", model.name, h,
-                     fold.number, fold.cutoff.date(), fold.end.date(), len(train), len(test),
-                     time.perf_counter() - t0)
-            results.append(pred.assign(y=test["y"], origin=test["origin"], fold=fold.number,
-                                       horizon=h, model=model.name, weather=weather_mode))
+            if key in fold_models:
+                model, note = fold_models[key], "shared"
+            elif fold.number % refit_every != 0 and key in previous_fold_models:
+                model, note = previous_fold_models[key], "reused from previous fold"
+            else:
+                set_seeds(cfg["seed"])
+                model = model_factory()
+                model.fit(train, h)
+                note = f"fit on {len(train)} rows"
+                if hasattr(model, "importance"):
+                    importances.append(model.importance.rename("gain").to_frame()
+                                       .assign(fold=fold.number, horizon=h))
+            fold_models[key] = model
+            pred = model.predict(test, h, context=cache.get(h, weather_mode))
+            log.info("%-8s h=%-3d fold %d %s..%s test=%d %-28s %.1fs", model.name, h, fold.number,
+                     fold.cutoff.date(), fold.end.date(), len(test), note, time.perf_counter() - t0)
+            results.append(pred.reindex(test.index).assign(
+                y=test["y"], origin=test["origin"], fold=fold.number, horizon=h,
+                model=model.name, weather=weather_mode))
+        previous_fold_models = fold_models
     out = pd.concat(results).reset_index()
+    out.attrs["importance"] = pd.concat(importances).reset_index(names="feature") if importances else None
     return out
 
 
 def model_registry() -> dict[str, Callable[[], Forecaster]]:
     from demand_forecast.models.baseline import SameHourLastWeek
-    return {"baseline": SameHourLastWeek}
+    from demand_forecast.models.prophet_ import ProphetForecaster
+    from demand_forecast.models.tft import TFTForecaster
+    from demand_forecast.models.xgb import XGBForecaster
+    return {"baseline": SameHourLastWeek, "xgboost": XGBForecaster, "prophet": ProphetForecaster,
+            "tft": TFTForecaster}
 
 
 def main() -> None:
@@ -135,7 +156,10 @@ def main() -> None:
 
     out_dir = PROJECT_ROOT / "artifacts" / "backtests"
     out_dir.mkdir(parents=True, exist_ok=True)
+    importance = preds.attrs.pop("importance", None)
     preds.to_parquet(out_dir / f"{args.model}__{args.weather}.parquet")
+    if importance is not None:
+        importance.to_parquet(out_dir / f"{args.model}__{args.weather}__importance.parquet")
 
     table = score_table(preds, ["model", "weather", "horizon"])
     metrics_dir = PROJECT_ROOT / "reports" / "metrics"

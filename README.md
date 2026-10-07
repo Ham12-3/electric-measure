@@ -5,7 +5,7 @@ and compares Prophet, XGBoost and a Temporal Fusion Transformer against a simple
 "same hour last week" baseline, using only information that would have been available
 at forecast time.
 
-> Status: **Phase 2 (features + baseline) complete.** Sections marked _TBD_ are filled in later phases.
+> Status: **complete** — data, backtests for 3 models + baseline, write-up, API, dashboard and Docker.
 
 ## 1. Problem
 
@@ -121,6 +121,28 @@ train ────────────────────────�
   never changes a feature.
 - Metrics per horizon: MAE (MW), RMSE (MW), MAPE (%); plus pinball loss for quantiles.
 
+### Models
+
+All three models run through the same backtest, on the same folds, with the same
+legal inputs. Hyperparameters were set up front in `configs/config.yaml`, not tuned on
+the test folds, because tuning on the test period would flatter the scores.
+
+| Model | How it forecasts | Uses recent demand? | One model per… |
+|---|---|---|---|
+| **Prophet** | Smooth trend + daily/weekly/yearly cycles + linear weather and holiday effects. Four daily cycles switch on {GMT, BST} × {working day, day off}, so the winter-weekday and summer-Sunday shapes can differ and clock changes line up | No, so its 1h forecast is no better informed than its 7-day one | fold (shared across horizons) |
+| **XGBoost** | Gradient-boosted trees on the feature table. Number of trees picked by early stopping on the last 8 weeks *of the training data*, then refit on everything | Yes, whatever's legal for the horizon | fold × horizon ("direct" strategy) |
+| **TFT** (Darts) | Neural network: reads a 1-week look-back of demand and calendar/weather, then forecasts all 168 hours at once, as 10th / 50th / 90th percentiles | Yes, up to the origin | 2 folds (retrained every half-year to fit a laptop) |
+
+**Honest weather for TFT.** TFT forecasts every hour of the coming week at once, but
+the weather inputs that are legal depend on the horizon. For horizon *h* we feed the
+horizon's legal forecast series for the whole window. TFT's decoder is causal (masked
+attention, forward LSTM), so the forecast for step *h* can only use inputs up to step *h*,
+and all of those are legal. A test changes later inputs and confirms the step-*h*
+forecast doesn't move.
+
+**Compute.** No GPU. On a 4-core laptop CPU the full backtests take about 7 min
+(XGBoost), 15 min (Prophet) and 2.3 h (TFT). See [Running TFT faster](#running-tft-faster).
+
 ### Baseline: same hour last week
 
 ŷ(Tue 18:00) = demand at the previous Tue 18:00. It gets the daily and weekly shape right
@@ -130,42 +152,121 @@ to come from the models using fresher information.
 
 ## 4. Architecture
 
-_TBD (Mermaid diagram)._
+```mermaid
+flowchart LR
+    subgraph Sources
+        NESO[NESO historic demand<br/>CKAN, ~3-week lag]
+        ELX[Elexon BMRS INDO<br/>near real time]
+        OMA[Open-Meteo archive<br/>actual weather]
+        OMP[Open-Meteo previous runs<br/>1-7 day forecasts]
+        OML[Open-Meteo live forecast]
+    end
+    subgraph Research["Research (offline)"]
+        DL[download_*] --> CL[clean.py<br/>UTC, hourly, QA] --> FE[features/<br/>calendar · lags ≥ h · weather by lead day]
+        FE --> BT[backtest.py<br/>10 quarterly folds, by origin]
+        BT --> M1[Baseline] & M2[Prophet] & M3[XGBoost] & M4[TFT]
+        M1 & M2 & M3 & M4 --> RP[report.py<br/>tables + charts]
+    end
+    subgraph Serving["Serving (Docker)"]
+        PL[pipeline.py<br/>daily retrain] --> MD[(XGBoost models<br/>h = 1,6,24,72,168)]
+        MD --> API[FastAPI<br/>/forecast /actuals /metrics]
+        API --> DB[Streamlit dashboard]
+    end
+    NESO & OMA & OMP --> DL
+    NESO & OMA --> PL
+    ELX & OML --> API
+```
 
 ## 5. Results
 
-Backtest: April 2024 – September 2026, 10 quarterly folds, forecast weather.
-Models are added in Phase 3.
+Backtest: April 2024 – September 2026, 10 quarterly folds, ~21,000 forecasts per
+horizon. All test-time weather is **forecast** weather. Best model per horizon in bold.
+Full tables: [reports/results.md](reports/results.md).
 
-| Model | Horizon | MAE (MW) | RMSE (MW) | MAPE |
-|---|---|---|---|---|
-| Same hour last week | 1h | 2,057 | 2,781 | 8.17% |
-| Same hour last week | 24h | 2,053 | 2,775 | 8.15% |
-| Same hour last week | 168h | 2,053 | 2,777 | 8.15% |
+| Horizon | Model | MAE (MW) | RMSE (MW) | MAPE | Skill vs baseline | Pinball q10 / q90 (MW) | 80% interval coverage |
+|---|---|---|---|---|---|---|---|
+| 1h | Same hour last week | 2,057 | 2,781 | 8.17% | 0% | – | – |
+| 1h | Prophet | 1,447 | 1,823 | 5.98% | 30% | – | – |
+| 1h | **XGBoost** | 343 | 453 | 1.39% | 83% | – | – |
+| 1h | TFT | 1,032 | 1,329 | 4.25% | 50% | 231 / 254 | 68% |
+| 24h | Same hour last week | 2,053 | 2,775 | 8.15% | 0% | – | – |
+| 24h | Prophet | 1,472 | 1,856 | 6.08% | 28% | – | – |
+| 24h | **XGBoost** | 991 | 1,348 | 4.10% | 52% | – | – |
+| 24h | TFT | 1,021 | 1,330 | 4.22% | 50% | 246 / 240 | 64% |
+| 168h | Same hour last week | 2,053 | 2,777 | 8.15% | 0% | – | – |
+| 168h | Prophet | 1,844 | 2,392 | 7.52% | 10% | – | – |
+| 168h | **XGBoost** | 1,405 | 1,907 | 5.76% | 32% | – | – |
+| 168h | TFT | 1,510 | 2,049 | 6.04% | 26% | 391 / 472 | 49% |
 
-The baseline's worst days are the cases models need to handle: cold snaps
-(7–8 Jan 2025), bank holidays, Easter, clock-change weekends, and the end of the
-June 2026 heatwave, when it copied a 31 °C week into a 19 °C one.
+*Skill vs baseline* = how much smaller the MAE is than "same hour last week".
+
+![24h-ahead forecasts for a winter week](reports/figures/sample_week.png)
+
+![Error by horizon](reports/figures/error_by_horizon.png)
+
+![Error by hour of day](reports/figures/error_by_hour.png)
+
+![XGBoost feature importance](reports/figures/xgb_importance.png)
+
+### How much does "cheating" with real weather flatter the score?
+
+The same XGBoost backtest, scored with the weather that actually happened instead of
+the forecast that was available at the time:
+
+| Horizon | MAPE, forecast weather (honest) | MAPE, actual weather (cheating) | Score flattered by |
+|---|---|---|---|
+| 1h | 1.39% | 1.39% | 0% |
+| 24h | 4.10% | 3.99% | 3% |
+| 168h | 5.76% | 4.60% | **20%** |
+
+![Forecast vs actual weather](reports/figures/weather_cheating.png)
 
 ## 6. Key findings
 
-_TBD._
+1. **XGBoost wins at every horizon**: 83% / 52% / 32% lower error than the baseline at
+   1h / 24h / 7d. It's also the fastest model to train (~10 s per model on a laptop).
+2. **Recent demand is everything at short horizons.** XGBoost's 1h model puts 77% of its
+   gain on last hour's demand and reaches 1.39% MAPE. Prophet has no lag inputs, so it
+   stays at ~6% whether forecasting 1 hour or 1 day ahead.
+3. **TFT is competitive at 24h (4.22% vs 4.10%) but not at 1h (4.25%).** One network
+   that forecasts all 168 steps, lightly trained to fit a CPU budget, doesn't exploit the
+   last hour the way a dedicated 1h model does. More training (GPU) might close some of
+   that gap.
+4. **TFT's 80% intervals are too narrow**: they catch 68% / 64% / 49% of actual values.
+   It trained on actual weather, so it never learned that weather forecasts can be
+   wrong, and the gap is worst at 7 days, where forecasts are worst. Training on archived
+   forecasts, or calibrating intervals on recent errors, would fix this.
+5. **Testing with real weather flatters 7-day scores by 20%.** At 1h it makes no
+   difference, because lags dominate. Many published demand-forecast results use
+   observed weather; this shows why that's misleading for longer horizons.
+6. **Errors peak at midday (12:00–14:00) for every model.** Rooftop solar output hides
+   demand from the grid, and cloud cover is hard to forecast, so midday is the most
+   uncertain time of day. Evening peaks are easier.
+7. **Hardest days**: cold snaps, bank holidays, Easter, clock-change weekends, and the
+   end of the June 2026 heatwave.
 
 ## 7. Limitations
 
 - Honest (forecast-weather) evaluation can only start in March 2024, when Open-Meteo's
-  archive of 1–7 day forecasts begins.
-- Five cities are a coarse proxy for national weather.
-- NESO publishes outturn about 3 weeks late, so the "latest actuals" are never today's.
-- Weather-model runs become available a few hours after their start time. For the very
-  end of the 7-day window no older forecast exists, so those hours are slightly optimistic.
+  archive of 1–7 day forecasts begins, so the test covers ~2.5 years.
+- Five cities are a coarse proxy for national weather, especially for solar and wind.
+- All models train on actual weather and are tested on forecast weather. That's
+  realistic, but the models never learn how far to trust a 7-day-old forecast.
+- The 168h horizon uses a weather forecast published up to ~8h after the origin
+  (no older one exists in the archive), so it's slightly optimistic.
+- Hyperparameters are sensible defaults, not tuned (deliberately, to avoid tuning on the
+  test period). A proper tuning set before April 2024 could improve all models.
+- TFT was sized for a laptop CPU (4 epochs, 20k windows, retrained half-yearly); a GPU
+  run could change its ranking.
+- Live demand after NESO's file comes from Elexon's *initial* outturn, which can be
+  revised slightly later.
 
 ## 8. How to run
 
 Requires [uv](https://docs.astral.sh/uv/). uv installs Python 3.12 automatically.
 
 ```bash
-uv sync
+uv sync --all-extras    # core + research (Prophet, Darts/PyTorch) + serve (FastAPI, Streamlit)
 uv run python -m demand_forecast.data.download_demand   # ~30 s
 uv run python -m demand_forecast.data.download_weather  # ~10 min (free-tier rate limits)
 uv run python -m demand_forecast.data.clean
@@ -176,13 +277,102 @@ uv run pytest
 
 Downloads are cached in `data/raw/`. Re-running only refreshes the current year.
 
+Model backtests (run one at a time; they compete for CPU):
+
+```bash
+uv run python -m demand_forecast.evaluation.backtest --model xgboost   # ~7 min
+uv run python -m demand_forecast.evaluation.backtest --model prophet   # ~15 min
+uv run python -m demand_forecast.evaluation.backtest --model tft       # ~2.3 h on CPU
+uv run python -m demand_forecast.evaluation.backtest --model xgboost --weather actual  # "cheating" run
+uv run python -m demand_forecast.evaluation.report                     # tables + charts
+```
+
+### Running TFT faster
+
+TFT doesn't *need* a GPU, but a CPU makes it slow: about 27 min per training run here.
+Retraining every half-year instead of every quarter halves that to 5 runs. Options,
+cheapest first:
+
+1. **Stay on CPU, train less**: fewer windows/epochs in `config.yaml → models.tft`.
+   Fast, but may underfit.
+2. **Kaggle Notebooks / Google Colab**: free NVIDIA T4. Clone the repo, `pip install -e .`,
+   upload `data/processed/`, and set `models.tft.accelerator: gpu`. Expect several times
+   faster training (not measured here). Kaggle offers a weekly free GPU quota.
+3. **AWS `g4dn.xlarge`** (T4): roughly $0.5/h on-demand and less on spot. A full TFT
+   backtest should cost around a dollar.
+
+## 9. Serving
+
+**What runs in production:** XGBoost, the best model at every horizon. It's a "direct"
+model (one per horizon), so we train five horizons (1, 6, 24, 72, 168 h). Hour *h* of the
+weekly forecast uses the smallest trained horizon ≥ *h*. That model only reads demand
+older than the forecast start, so no hour can leak.
+
+**Fresh demand:** NESO's file is ~3 weeks behind, which is useless for a 1h forecast.
+The API tops it up with Elexon's *Initial National Demand Outturn*, published within
+~30 minutes. Over 1,200 overlapping half-hours it matched NESO ND to 0.10% on average,
+so it's treated as the same series. NESO's settled values win wherever both exist.
+
+**Weather:** Open-Meteo's live forecast, using the same ECMWF model as the backtest.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /forecast` | next 168 hourly forecasts (MW), origin time, model training date. Cached 30 min |
+| `GET /actuals?days=14` | recent hourly demand |
+| `GET /metrics` | backtest scores for every model and horizon |
+| `GET /health` | model status |
+
+```bash
+uv sync --all-extras
+uv run python -m demand_forecast.serving.production       # train production models (~2 min)
+uv run uvicorn demand_forecast.serving.api:app --reload   # http://localhost:8000/docs
+uv run streamlit run dashboard/app.py                     # http://localhost:8501
+```
+
+With Docker (needs `data/processed/` and `artifacts/models/` from the steps above, or run
+the pipeline container first):
+
+```bash
+docker compose run --rm pipeline   # download, clean, retrain
+docker compose up --build          # API :8000, dashboard :8501
+```
+
+The image installs only the `serve` extra. Prophet, Darts and PyTorch stay out, which
+keeps it small and the build quick.
+
+### Deploying on AWS (suggested, simple)
+
+```mermaid
+flowchart LR
+    EB[EventBridge Scheduler<br/>daily 06:00] --> ECS[ECS Fargate task<br/>pipeline container]
+    ECS -->|models + processed data| S3[(S3 bucket)]
+    S3 --> AR[App Runner<br/>API container]
+    S3 --> AR2[App Runner<br/>dashboard container]
+    ECR[(ECR image)] --> ECS & AR & AR2
+```
+
+1. **Image:** build once, push to **ECR**. The same image runs all three roles.
+2. **Daily retraining:** an **EventBridge Scheduler** rule starts the `pipeline` command
+   as an **ECS Fargate** task (1 vCPU / 4 GB is plenty; ~5–10 min). It writes
+   `artifacts/models/` and `data/processed/` to **S3**. A small change is needed:
+   sync those folders from/to S3 at start and end, e.g. `aws s3 sync`.
+3. **API and dashboard:** two **App Runner** services from the same image. App Runner gives
+   HTTPS, autoscaling and scale-to-low with no load balancer to manage. On start (and
+   daily), the API pulls the latest models from S3.
+4. **Ops:** CloudWatch logs and an alarm on pipeline task failure. Secrets aren't needed:
+   all data sources are free and keyless (Open-Meteo is free for non-commercial use;
+   commercial use needs their paid plan).
+
+Rough cost: App Runner ~$5–15/month per service at low traffic, plus cents for the daily
+Fargate run and S3.
+
 ## Roadmap
 
 1. ✅ Setup and data
 2. ✅ Features and baseline
-3. Models (Prophet, XGBoost, TFT)
-4. Evaluation and write-up
-5. Serving (FastAPI, Streamlit, Docker) and deployment
+3. ✅ Models (Prophet, XGBoost, TFT)
+4. ✅ Evaluation and write-up
+5. ✅ Serving (FastAPI, Streamlit, Docker); AWS deployment documented, not deployed
 
 ## Data licences
 

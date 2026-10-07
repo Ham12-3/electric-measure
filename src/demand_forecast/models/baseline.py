@@ -20,5 +20,5 @@ class SameHourLastWeek:
         if h > 168:
             raise ValueError("same-hour-last-week is only available for horizons <= 168h")
 
-    def predict(self, test: pd.DataFrame, h: int) -> pd.DataFrame:
+    def predict(self, test: pd.DataFrame, h: int, context: pd.DataFrame | None = None) -> pd.DataFrame:
         return pd.DataFrame({"y_pred": test["lag_168"]}, index=test.index)

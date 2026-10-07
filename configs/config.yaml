@@ -38,6 +38,44 @@ backtest:
   test_start: "2024-04-01"    # first forecast origin (forecast weather exists from 2024-03-13)
   fold_months: 3              # refit every quarter, test on the following quarter
 
+serving:
+  # Production XGBoost horizons. Hour h of the 7-day forecast uses the model for the
+  # smallest horizon >= h, which only reads older demand, so it's always legal.
+  model_horizons: [1, 6, 24, 72, 168]
+
+# Hyperparameters were chosen up front (sensible defaults), NOT tuned on the backtest
+# folds. Tuning on the test period would make the scores optimistic.
+models:
+  xgboost:
+    n_estimators: 3000          # upper bound; early stopping picks the real number
+    early_stopping_rounds: 100
+    validation_weeks: 8
+    learning_rate: 0.08          # 0.03 gave the same accuracy at 4x the training time
+    max_depth: 7
+    min_child_weight: 5
+    subsample: 0.8
+    colsample_bytree: 0.8
+    n_jobs: 4
+  prophet:
+    daily_fourier: 10           # detail allowed in each daily cycle
+    weekly_fourier: 6
+    yearly_fourier: 10
+    changepoint_prior_scale: 0.05  # Prophet default: how flexible the trend is
+  tft:
+    input_chunk_length: 168     # look back 1 week
+    output_chunk_length: 168    # forecast 1 week in one shot
+    hidden_size: 32             # small network: CPU budget
+    attention_heads: 4
+    hidden_continuous_size: 16
+    dropout: 0.1
+    batch_size: 256             # bigger batches are ~2x faster per sample on this CPU
+    learning_rate: 0.002        # scaled up with the larger batch
+    n_epochs: 4
+    max_training_windows: 20000 # most recent ~2.3 years of 1-week windows per fit
+    refit_every_folds: 2        # retrain every half-year; in between reuse the older model
+    threads: 4
+    accelerator: cpu            # "gpu" on Kaggle/Colab/AWS g4dn (see README)
+
 demand:
   ckan_package_url: "https://api.neso.energy/api/3/action/package_show?id=historic-demand-data"
   # Physically plausible range for GB national demand (MW). Anything outside is a data error.

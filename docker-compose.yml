@@ -1,0 +1,31 @@
+# docker compose up --build          -> API on :8000, dashboard on :8501
+# docker compose run --rm pipeline   -> refresh data + retrain (run daily)
+services:
+  api:
+    build: .
+    image: gb-demand-forecast
+    ports: ["8000:8000"]
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    image: gb-demand-forecast
+    command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    environment:
+      API_URL: http://api:8000
+    ports: ["8501:8501"]
+    depends_on: [api]
+
+  pipeline:
+    image: gb-demand-forecast
+    command: ["python", "-m", "demand_forecast.serving.pipeline"]
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    profiles: ["jobs"]   # not started by `up`; run on a schedule

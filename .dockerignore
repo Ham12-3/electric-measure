@@ -1,0 +1,8 @@
+.venv
+.git
+data
+artifacts
+**/__pycache__
+.pytest_cache
+notebooks/*.ipynb
+lightning_logs

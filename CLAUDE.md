@@ -57,9 +57,32 @@ briefly, in plain English, in comments and the README.
   (see `models/base.py`). Register new models in `evaluation/backtest.py:model_registry`.
 - Baseline uses `lag_168` (UTC), so it's misaligned by 1h in the week after a clock change.
 
-## Open issues for later phases
-- Serving (Phase 5): NESO historic demand lags ~3 weeks, so it can't drive live 1h/24h
-  forecasts. Need a near-real-time source (e.g. Elexon BMRS demand outturn); verify then.
+## Models (Phase 3)
+- `xgboost` (direct, one model per horizon), `prophet` (horizon_independent; 4 conditional
+  daily seasonalities {GMT,BST}x{workday,day off}), `tft` (Darts TFTModel, quantiles
+  0.1/0.5/0.9, horizon_independent, refit every 2 folds). Hyperparameters are fixed in
+  config.yaml - do NOT tune on backtest folds.
+- TFT honest weather relies on a causal decoder (`full_attention=False`); `tests/test_tft.py`
+  guards it. Covariates past the target are ffill-padded (harmless because causal).
+
+## Performance notes (4-core i5 laptop, no GPU)
+- NEVER run two CPU-heavy jobs at once: XGBoost/torch OpenMP threads thrash when
+  oversubscribed (an XGB fit went from ~20s to 1,277s next to Prophet).
+- Backtest times: baseline <1 min, XGBoost ~7 min, Prophet ~15 min, TFT ~80 min.
+- Tool background jobs are killed at ~30 min; launch long runs detached
+  (PowerShell `Start-Process ... -RedirectStandardOutput artifacts/logs/<x>.log`).
+- TFT speed is dominated by batch overhead: batch 256 is ~2x faster per sample than 128;
+  hidden 16 vs 32 makes little difference.
+
+## Serving (Phase 5)
+- Production = XGBoost at horizons [1,6,24,72,168]; hour h uses smallest H >= h (legal).
+  Train: `python -m demand_forecast.serving.production`; daily job: `serving.pipeline`.
+- Live demand = NESO processed + Elexon INDO (`data/download_recent.py`, matches ND to
+  0.10%; max 28 days per request). Live weather = Open-Meteo forecast API, ecmwf_ifs025.
+- Deps: core + extras `research` (prophet, darts[torch]) and `serve` (fastapi, uvicorn,
+  streamlit). Use `uv sync --all-extras` locally; Docker installs `--extra serve` only.
+  Don't run `uv sync` while a torch job is running.
+- Final results: reports/results.md (XGBoost best everywhere; TFT intervals under-cover).
 
 ## Layout
 - `configs/config.yaml` - all tunables (cities + weights, dates, horizons, seed).

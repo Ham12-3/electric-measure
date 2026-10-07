@@ -46,4 +46,10 @@ def score(df: pd.DataFrame) -> pd.Series:
 
 
 def score_table(preds: pd.DataFrame, by: list[str]) -> pd.DataFrame:
-    return preds.groupby(by).apply(score, include_groups=False)
+    # Build rows explicitly: models report different metric sets (only TFT has quantiles),
+    # and groupby.apply would then return a stacked Series instead of a table.
+    rows = {key: score(g) for key, g in preds.groupby(by)}
+    table = pd.DataFrame.from_dict(rows, orient="index")
+    table.index = pd.MultiIndex.from_tuples(table.index, names=by) if len(by) > 1 else pd.Index(
+        [k[0] if isinstance(k, tuple) else k for k in table.index], name=by[0])
+    return table
